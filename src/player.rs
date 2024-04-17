@@ -5,7 +5,9 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use bevy_rapier3d::prelude::*;
 
-use crate::physics::controller::{Controller, ControllerBundle, Speed};
+use std::time::Duration;
+
+use crate::physics::controller::{Controller, ControllerBundle, JumpHeight, Speed};
 use crate::{GamePhase, GameState};
 
 /// A factor applied with the sensitivity that roughly translates logical units
@@ -27,6 +29,7 @@ impl Plugin for PlayerPlugin {
                     process_camera_lock_input,
                     process_camera_input,
                     process_movement_input,
+                    unbuffer_jump_timer,
                 )
                     .chain()
                     .in_set(GamePhase::Input),
@@ -100,6 +103,47 @@ impl LocalCamera {
     }
 }
 
+/// Jump timer things.
+///
+/// This serves as a sort of buffer for jump presses.
+#[derive(Clone, Component, Debug)]
+pub struct JumpTimer {
+    buffer_time: Duration,
+    timer: Timer,
+    ticking: bool,
+}
+
+impl JumpTimer {
+    /// Creates a new jump timer.
+    pub fn new(buffer_time: Duration) -> JumpTimer {
+        JumpTimer {
+            buffer_time,
+            timer: Timer::new(buffer_time, TimerMode::Once),
+            ticking: false,
+        }
+    }
+
+    /// Checks if the window is still in.
+    pub fn running(&self) -> bool {
+        self.ticking && !self.timer.finished()
+    }
+
+    /// Sets the jump timer.
+    pub fn set(&mut self) {
+        self.ticking = true;
+        self.timer = Timer::new(self.buffer_time, TimerMode::Once);
+    }
+
+    /// Stops the jump timer.
+    pub fn stop(&mut self) {
+        self.ticking = false;
+    }
+
+    fn tick(&mut self, delta: Duration) {
+        self.timer.tick(delta);
+    }
+}
+
 /// A system that spawns the player in after loading.
 pub fn spawn_player(mut commands: Commands) {
     // spawn the player
@@ -109,6 +153,8 @@ pub fn spawn_player(mut commands: Commands) {
             ..default()
         },
         Speed(15.),
+        JumpHeight::new(6.),
+        JumpTimer::new(Duration::from_millis(55)),
         LocalPlayer,
     ));
 
@@ -163,11 +209,11 @@ pub fn process_camera_lock_input(
 
 /// Processes the movement input from the player.
 pub fn process_movement_input(
-    mut player: Query<(&mut Controller, &Speed), With<LocalPlayer>>,
+    mut player: Query<(&mut Controller, &Speed, &mut JumpTimer), With<LocalPlayer>>,
     camera: Query<&LocalCamera>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
 ) {
-    let (Ok((mut controller, speed)), Ok(local_camera)) =
+    let (Ok((mut controller, speed, mut jump_timer)), Ok(local_camera)) =
         (player.get_single_mut(), camera.get_single())
     else {
         return;
@@ -193,6 +239,27 @@ pub fn process_movement_input(
     let right = local_camera.right() * axis_right * speed.0;
 
     controller.update_move(forward + right);
+
+    if keyboard_input.just_pressed(KeyCode::Space) {
+        jump_timer.set();
+    }
+}
+
+/// Actually sets the jump impulse when a jump is detected.
+pub fn unbuffer_jump_timer(
+    mut query: Query<(&mut JumpTimer, &JumpHeight, &mut Controller)>,
+    time: Res<Time>,
+) {
+    for (mut jump_timer, jump_height, mut controller) in query.iter_mut() {
+        if jump_timer.running() && controller.grounded() {
+            controller.update_y_impulse(jump_height.impulse());
+
+            // unset jump timer
+            jump_timer.stop();
+        }
+
+        jump_timer.tick(time.delta());
+    }
 }
 
 /// Updates the cursor lock from the [`LocalCamera`] interface.
